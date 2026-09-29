@@ -58,7 +58,7 @@ jobs:
           CORE_PATH: ${{ secrets.DEV_VAULT_CORE_PATH }}
         run: |
           set -euo pipefail
-          python -m pip install --quiet -r "private/$CORE_PATH/requirements.txt"
+          python -m pip install --quiet --only-binary=:all: -r "private/$CORE_PATH/requirements.txt"
 
       - name: Ejecutar la corrida
         id: ejecutar
