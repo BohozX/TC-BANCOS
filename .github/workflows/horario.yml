@@ -1,0 +1,156 @@
+name: Consulta horaria TC-BANCOS
+
+on:
+  schedule:
+    - cron: "41 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: tc-bancos
+  cancel-in-progress: false
+
+jobs:
+  consultar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Descargar repositorio publico
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Descargar el motor privado
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          repository: ${{ secrets.DEV_VAULT_REPOSITORY }}
+          ref: main
+          ssh-key: ${{ secrets.DEV_VAULT_DEPLOY_KEY }}
+          path: private
+          sparse-checkout: |
+            ${{ secrets.DEV_VAULT_CORE_PATH }}
+          sparse-checkout-cone-mode: true
+          persist-credentials: true
+
+      - name: Configurar Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065  # v5.6.0
+        with:
+          python-version: "3.13"
+
+      - name: Validar configuracion privada
+        shell: bash
+        env:
+          CORE_PATH: ${{ secrets.DEV_VAULT_CORE_PATH }}
+        run: |
+          set -euo pipefail
+          test -n "$CORE_PATH"
+          case "$CORE_PATH" in
+            /*|*..*) echo "Ruta privada no valida" >&2; exit 1 ;;
+          esac
+          test -f "private/$CORE_PATH/codigo/main.py"
+
+      - name: Instalar dependencias
+        shell: bash
+        env:
+          CORE_PATH: ${{ secrets.DEV_VAULT_CORE_PATH }}
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet -r "private/$CORE_PATH/requirements.txt"
+
+      - name: Ejecutar la corrida
+        id: ejecutar
+        continue-on-error: true
+        shell: bash
+        env:
+          CORE_PATH: ${{ secrets.DEV_VAULT_CORE_PATH }}
+        run: |
+          set -euo pipefail
+          python "private/$CORE_PATH/codigo/main.py"
+
+      - name: Verificar las salidas publicas
+        if: steps.ejecutar.outcome == 'success'
+        shell: bash
+        env:
+          CORE_PATH: ${{ secrets.DEV_VAULT_CORE_PATH }}
+        run: |
+          set -euo pipefail
+          PUB="private/$CORE_PATH/publico"
+          test -s "$PUB/reporte.png"
+          test -s "$PUB/ultimos_30_dias.csv"
+          head -n 1 "$PUB/ultimos_30_dias.csv" | grep -q '^fecha_hora,'
+
+      - name: Guardar en el vault privado
+        if: always()
+        shell: bash
+        env:
+          CORE_PATH: ${{ secrets.DEV_VAULT_CORE_PATH }}
+        run: |
+          set -euo pipefail
+          git -C private add -- "$CORE_PATH/datos" "$CORE_PATH/estado" "$CORE_PATH/registro"
+          SUELTO="$(git -C private diff --name-only)"
+          if [ -n "$SUELTO" ]; then
+            echo "Modificado y sin preparar:"
+            echo "$SUELTO"
+          fi
+          if git -C private diff --cached --quiet; then
+            echo "El vault ya esta al dia."
+            exit 0
+          fi
+          git -C private config user.name "Daniel Bohoz Oros Trujillo"
+          git -C private config user.email "283808960+BohozX@users.noreply.github.com"
+          git -C private commit -m "${CORE_PATH}: actualizacion automatica"
+          for intento in 1 2 3; do
+            git -C private pull --rebase --autostash origin main
+            if git -C private push origin HEAD:main; then
+              exit 0
+            fi
+            if [ "$intento" -eq 3 ]; then
+              echo "No se pudo sincronizar el vault privado tras 3 intentos." >&2
+              exit 1
+            fi
+            sleep $((intento * 2))
+          done
+
+      - name: Publicar reporte y ultimos 30 dias
+        if: steps.ejecutar.outcome == 'success'
+        shell: bash
+        env:
+          CORE_PATH: ${{ secrets.DEV_VAULT_CORE_PATH }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          PUB="private/$CORE_PATH/publico"
+          cp "$PUB/reporte.png" .
+          cp "$PUB/ultimos_30_dias.csv" .
+          if [ -n "$(git status --porcelain | grep -v -E 'reporte.png|ultimos_30_dias.csv' || true)" ]; then
+            echo "Hay cambios inesperados fuera de las salidas autorizadas." >&2
+            git status --porcelain >&2
+            exit 1
+          fi
+          if [ -z "$(git status --porcelain reporte.png ultimos_30_dias.csv)" ]; then
+            echo "Sin cambios publicos."
+            exit 0
+          fi
+          git config user.name "Daniel Bohoz Oros Trujillo"
+          git config user.email "283808960+BohozX@users.noreply.github.com"
+          git add reporte.png ultimos_30_dias.csv
+          git commit -m "Actualizacion TC bancos $(TZ=America/La_Paz date '+%Y-%m-%d %H:%M') BOT"
+          REMOTO="https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          for intento in 1 2 3; do
+            git pull --rebase --autostash "$REMOTO" main
+            if git push "$REMOTO" HEAD:main; then
+              exit 0
+            fi
+            if [ "$intento" -eq 3 ]; then
+              echo "No se pudo publicar tras 3 intentos." >&2
+              exit 1
+            fi
+            sleep $((intento * 2))
+          done
+
+      - name: Propagar el fallo
+        if: steps.ejecutar.outcome == 'failure'
+        run: exit 1

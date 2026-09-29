@@ -1,0 +1,7 @@
+*.log
+*.tmp
+__pycache__/
+.env
+.env.*
+*credentials*.json
+private/
