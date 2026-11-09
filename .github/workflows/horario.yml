@@ -21,6 +21,7 @@ jobs:
       - name: Descargar repositorio publico
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
+          ref: main
           persist-credentials: false
 
       - name: Descargar el motor privado
